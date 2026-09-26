@@ -1,19 +1,29 @@
-# Staged wiring for the primary Web profile.
+# Wiring for the primary Web profile.
 #
-# This file is NOT applied yet. It records the exact edits the plugin needs in
-# `~/.dsh/profiles/web/cordis.patch.yml`, because a new `link:` dependency is
-# read at startup: the row cannot resolve until the host restarts, and applying
-# the preset swap before that restart would leave new `personal` sessions
-# mounting an unresolved row.
+# APPLIED on 2026-09-26 to ~/.dsh/profiles/web/cordis.patch.yml, which was backed
+# up first to cordis.patch.yml.bak-20260926-204348. The applied state, verified by
+# a boot-free `--dump-config` (exit 0, both engine rows and the host row present):
 #
-# Order of operations:
-#   1. dsh plugin --profile web add C:/resource/dsh-compaction-threshold
-#   2. apply the edits below to ~/.dsh/profiles/web/cordis.patch.yml
-#   3. restart the host (Ctrl+C, then the same `dsh web` command)
+#   * host row `compaction-threshold` (`dsh-compaction-threshold`) appended;
+#   * `compaction-basic` -> `compaction-threshold-engine` inside the `compaction`
+#     group of preset-personal and preset-personal-browser, keeping
+#     `thresholdRatio: 0.4`, `command-compact`, and `tool-result-pruner`;
+#   * `preset-minimal-git-bash-persistent` removed (declaration and its
+#     now-empty insert list);
+#   * `preset-minimal-browser` deliberately left on upstream `compaction-basic`.
 #
-# Rollback: remove the host row, restore `compaction-basic` inside the two
-# presets, re-add `preset-minimal-git-bash-persistent` from the backup, and
+# `node deploy/apply-web-wiring.mjs <patch> [--write]` reproduces those edits.
+# The host needs one restart afterwards: a `link:` dependency is read at startup,
+# so the row cannot resolve in the running process, and applying this before that
+# restart leaves new `personal` sessions mounting an unresolved row.
+#
+# Rollback: restore the backup above, then
 # `dsh plugin --profile web remove dsh-compaction-threshold`.
+#
+# Sessions already using the removed preset can no longer be resumed: recovery
+# rejects a missing definition. The authoring copy under
+# ~/.dsh/.agent-presets/minimal-git-bash-persistent/ is no longer referenced by
+# the profile patch.
 
 # ── 1. host plane: the store, the projection, and the command ────────────────
 # Insert next to the other host-plane rows (an `insert:` list already exists in
