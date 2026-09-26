@@ -1,0 +1,59 @@
+# Staged wiring for the primary Web profile.
+#
+# This file is NOT applied yet. It records the exact edits the plugin needs in
+# `~/.dsh/profiles/web/cordis.patch.yml`, because a new `link:` dependency is
+# read at startup: the row cannot resolve until the host restarts, and applying
+# the preset swap before that restart would leave new `personal` sessions
+# mounting an unresolved row.
+#
+# Order of operations:
+#   1. dsh plugin --profile web add C:/resource/dsh-compaction-threshold
+#   2. apply the edits below to ~/.dsh/profiles/web/cordis.patch.yml
+#   3. restart the host (Ctrl+C, then the same `dsh web` command)
+#
+# Rollback: remove the host row, restore `compaction-basic` inside the two
+# presets, re-add `preset-minimal-git-bash-persistent` from the backup, and
+# `dsh plugin --profile web remove dsh-compaction-threshold`.
+
+# ── 1. host plane: the store, the projection, and the command ────────────────
+# Insert next to the other host-plane rows (an `insert:` list already exists in
+# the patch; add this entry to it, or start a second list).
+- id: compaction-threshold
+  name: 'dsh-compaction-threshold'
+
+# ── 2. preset-personal and preset-personal-browser: swap the backend ─────────
+# Inside each preset's `compaction` group (`name: cordis:group`, `group: true`,
+# `isolate: { compaction: true, toolResultPruner: true }`), replace the
+# `compaction-basic` row with the engine row. Keep `command-compact` and
+# `tool-result-pruner` exactly as they are:
+#
+#   - id: compaction-threshold-engine
+#     name: 'dsh-compaction-threshold/engine'
+#     config:
+#       thresholdRatio: 0.4        # the value used until a session overrides it
+#
+# The shipped row being replaced, for reference:
+#
+#   - id: compaction-basic
+#     name: '@deepseek-ai/dsh-compaction-basic'
+
+# ── 3. drop preset-minimal-git-bash-persistent ───────────────────────────────
+# Delete the whole `- id: preset-minimal-git-bash-persistent` entry from the
+# patch (it is one `insert:` list item). Sessions already using that preset
+# cannot be resumed afterwards, because recovery rejects a missing definition.
+# Back it up first:
+#
+#   Copy-Item ~/.dsh/profiles/web/cordis.patch.yml \
+#             ~/.dsh/profiles/web/cordis.patch.yml.bak-$(Get-Date -f yyyyMMdd-HHmmss)
+#
+# The authoring copy under ~/.dsh/.agent-presets/minimal-git-bash-persistent/
+# is no longer referenced by the profile patch once this row is gone.
+
+# ── 4. optional: source hot reload for the plugin ────────────────────────────
+# Add to the `hmr` row's `root` list so edits reload without a restart. The same
+# caveat as any watched root: an unfinished edit reaches the running host.
+#
+#   - 'C:/resource/dsh-compaction-threshold/index.js'
+#   - 'C:/resource/dsh-compaction-threshold/engine.js'
+#   - 'C:/resource/dsh-compaction-threshold/lib/policy.js'
+#   - 'C:/resource/dsh-compaction-threshold/client.js'

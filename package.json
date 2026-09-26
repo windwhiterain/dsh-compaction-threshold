@@ -1,0 +1,37 @@
+{
+  "name": "dsh-compaction-threshold",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-session automatic compaction threshold for DeepSeek Harness: a compaction backend whose trigger percentage is stored per session and adjustable from the Web composer while the session runs.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "agent",
+    "cordis",
+    "plugin",
+    "compaction"
+  ],
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./engine": "./engine.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "engine.js",
+    "client.js",
+    "lib/*.js",
+    "README.md"
+  ],
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}
