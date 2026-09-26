@@ -13,6 +13,12 @@
     "compaction"
   ],
   "license": "MIT",
+  "author": "windwhiterain",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/windwhiterain/dsh-compaction-threshold.git"
+  },
+  "homepage": "https://github.com/windwhiterain/dsh-compaction-threshold#readme",
   "exports": {
     ".": "./index.js",
     "./engine": "./engine.js",

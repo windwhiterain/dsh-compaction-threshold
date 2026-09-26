@@ -1,155 +1,165 @@
 # dsh-compaction-threshold
 
-Per-session automatic compaction threshold for DeepSeek Harness, adjustable
-from the Web composer while a session runs.
+**Per-session automatic compaction threshold for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), adjustable from the Web composer while a session runs.**
 
-`@deepseek-ai/dsh-compaction-basic` fixes `thresholdRatio` in the agent preset:
-one number for every session that preset serves, changeable only by editing YAML
-and reloading. This plugin keeps the same trigger arithmetic but lets each
-session carry its own ratio, stored durably beside the session log, and shows it
-as a chip beside the permission and model chips.
+The shipped backend (`@deepseek-ai/dsh-compaction-basic`) fixes the trigger
+percentage in the agent preset: one number for every session that preset serves,
+changeable only by editing YAML and reloading the host. That is the wrong
+granularity for real work — a long refactor wants to compact late and keep its
+history verbatim, a scratch session wants to compact early and stay cheap, and
+neither should require a host restart.
+
+This plugin keeps the same trigger arithmetic and makes the percentage **per
+session**: a chip beside the permission and model chips shows the value, a menu
+changes it in one click, `/compaction-threshold` does the same from the keyboard,
+and the value is stored durably beside the session log so it survives a restart.
+A forked session and a delegated subagent inherit their parent's value.
+
+The package is **third-party**, and it is honest about its coupling: a compaction
+backend must be a subclass of the shipped engine, so unlike a plugin that only
+talks to the Cordis context, this one imports
+`@deepseek-ai/dsh-compaction-basic` and copies its trigger policy. Read
+[Known limitations](#known-limitations) before upgrading the harness.
+
+- [What it looks like](#what-it-looks-like)
+- [Quick start](#quick-start)
+- [Use](#use)
+- [Inheritance](#inheritance)
+- [How it works](#how-it-works)
+- [Model experience](#model-experience)
+- [Verification](#verification)
+- [Developing against a dev host](#developing-against-a-dev-host)
+- [Known limitations](#known-limitations)
+
+## What it looks like
+
+The chip sits with the permission and model chips in the composer, and shows the
+session's current percentage:
+
+![The threshold chip in the composer](docs/composer.png)
+
+The menu offers the preset default and 30 %–100 %. Here the session is a fork
+that inherited its parent's 70 %, so the menu also states where the value came
+from:
+
+![The threshold menu](docs/menu.png)
+
+Once a request has been measured, the chip's tooltip and the menu heading report
+the percentage the trigger actually resolved to, so an inert setting (one above
+the capacity cap) is visible rather than silent.
+
+## Quick start
+
+```sh
+dsh plugin --profile web add github:windwhiterain/dsh-compaction-threshold
+```
+
+Then wire two rows into `~/.dsh/profiles/web/cordis.patch.yml` — one on the host
+plane, one inside each agent preset that should become adjustable:
+
+```yaml
+# host plane: the durable store, the Session projection, and the command
+- insert:
+    - id: compaction-threshold
+      name: 'dsh-compaction-threshold'
+
+# agent plane: replace the shipped backend inside the preset's compaction group
+#   - id: compaction-basic
+#     name: '@deepseek-ai/dsh-compaction-basic'          # remove this row
+#   ...and add:
+#   - id: compaction-threshold-engine
+#     name: 'dsh-compaction-threshold/engine'
+```
+
+Keep `command-compact` and `tool-result-pruner` exactly as they were. Omit
+`thresholdRatio` on the engine row to follow the backend default (0.8); state it
+to give that preset a different starting point.
+
+**Restart the host afterwards.** A new dependency is read at startup, so the row
+cannot resolve in the running process, and applying the preset swap before that
+restart leaves new sessions mounting an unresolved row. `deploy/` holds the same
+instructions as a checklist and a script that applies them structurally:
+
+```sh
+node deploy/apply-web-wiring.mjs ~/.dsh/profiles/web/cordis.patch.yml [--write]
+```
+
+## Use
+
+The chip opens a menu of `Preset default` plus 30 %–100 %. The same change can be
+typed:
+
+| Input | Effect |
+|---|---|
+| `/compaction-threshold` | Report the current value, its origin, and the resolved trigger |
+| `/compaction-threshold 60` or `60%` | Compact this session once pressure reaches 60 % of its window |
+| `/compaction-threshold 0.6` | The same, written as a ratio (bare values ≤ 1 are ratios) |
+| `/compaction-threshold default` | Drop the value and follow the preset again |
+
+The change applies from the next step, is enforced against a turn already in
+flight (the value is read at every step boundary), and survives a restart.
+
+## Inheritance
+
+A forked session and a delegated subagent both record their direct parent in
+`SessionHeader.parentSession`, so both inherit. A child receives a **snapshot** of
+the nearest ancestor that owns a value, up to 16 generations, and owns it from
+then on:
+
+| Situation | Result |
+|---|---|
+| Child's parent has 70 %, preset default 10 % | Child shows 70 %, marked `inherited from the parent session` |
+| The parent had no value, its own parent had 25 % | Child inherits 25 % (nearest ancestor with a value) |
+| The parent changes 70 % → 50 % after the child exists | Child keeps 70 %: the snapshot was taken once |
+| Child's `/compaction-threshold default` | Child returns to the preset default and does **not** re-inherit |
+| No ancestor owns a value | Child follows the preset default |
+
+The record that carries a snapshot is also the marker that the inheritance was
+spent, which is what keeps `default` meaningful in a child. The value is written
+durably, and the chip keeps the origin visible until the child's own value
+differs from the inherited one.
 
 ## How it works
 
-Two Loader rows, because a compaction backend and the UI that configures it live
+Two rows, because a compaction backend and the interface that configures it live
 on different planes:
 
 | Row | Plane | Owns |
 |---|---|---|
-| `dsh-compaction-threshold` | Host | The storage domain keyed by session id, the `compactionThreshold` Session projection, and the `/compaction-threshold` command |
-| `dsh-compaction-threshold/engine` | Agent preset (inside the preset's `compaction` group) | The `ctx.compaction` service: `BasicCompactionEngine` with a per-session pressure ratio |
+| `dsh-compaction-threshold` | Host | The storage domain keyed by Session id, the `compactionThreshold` Session projection, and the `/compaction-threshold` command |
+| `dsh-compaction-threshold/engine` | Agent preset, inside its `compaction` group | The `ctx.compaction` service: the shipped engine with a per-session pressure ratio |
 
-The engine reads the override synchronously from the host service and falls back
-to its own configured `thresholdRatio` when the host row is absent, so a
-miswired composition degrades to upstream behaviour instead of disabling
-compaction. Context-overflow recovery, retention, pruning, retries, and
-summarization are inherited from upstream unchanged.
+The engine reads the value synchronously from the host service and falls back to
+its own configured `thresholdRatio` when the host row is absent, so a miswired
+composition degrades to the shipped behaviour instead of disabling compaction.
+Context-overflow recovery, retention, pruning, retries, and summarization are
+inherited unchanged.
 
 ### The threshold formula
 
-Unchanged from upstream (0.1.7-rc.1):
+Unchanged from the shipped backend:
 
 ```
 thresholdTokens = floor(min(contextWindow × ratio, contextWindow − outputReservation − headroomTokens))
 ```
 
-Only `ratio` may come from the session. A ratio at or above
+Only `ratio` can come from the session. A ratio at or above
 `(contextWindow − outputReservation − headroomTokens) / contextWindow` therefore
-changes nothing: the capacity cap binds first. The composer menu always shows the
-percentage the last request actually resolved to, so an inert setting is visible
-rather than silent.
+changes nothing: the capacity cap binds first, and the chip reports the resolved
+trigger so that is visible rather than silent.
 
 ### Why the override lives in a storage domain, not the session log
 
 The Session persistence reader refuses an event type outside the generated
-`KNOWN_SESSION_EVENT_TYPES` catalog unless the record carries `ignorable: true`
+known-type catalog unless the record carries `ignorable: true`
 (`packages/session/session-persistence/src/storage-contract.ts`), and
-`Session.append()` has no way to set that marker. A plugin outside this
+`Session.append()` cannot set that marker. A plugin outside the harness
 repository therefore cannot add a Session event: its own logs would stop loading.
 The override is non-session application data, so it belongs in
 `ctx.storageDomain`, and the client is notified through a Session projection —
 which is key-addressed and needs no client code per domain.
 
-## Install
-
-The plugin is plain ESM JavaScript with no build step.
-
-```jsonc
-// ~/.dsh/profiles/<profile>/package.json
-"dependencies": {
-  "dsh-compaction-threshold": "link:C:/resource/dsh-compaction-threshold"
-}
-```
-
-```sh
-cd ~/.dsh/profiles/<profile> && pnpm install     # makes the package resolvable
-# restart the host: a new dependency is read at startup, unlike a patch edit
-```
-
-Host row, in the profile patch (`cordis.patch.yml`, live-reloaded):
-
-```yaml
-- insert:
-    - id: compaction-threshold
-      name: 'dsh-compaction-threshold'
-```
-
-Engine row, replacing `compaction-basic` inside each preset that should become
-adjustable (keep `command-compact` and `tool-result-pruner` beside it):
-
-```yaml
-- id: compaction
-  name: cordis:group
-  group: true
-  isolate:
-    compaction: true
-    toolResultPruner: true
-  config:
-    - id: compaction-threshold
-      name: 'dsh-compaction-threshold/engine'
-      config:
-        thresholdRatio: 0.4        # the value used until a session overrides it
-    - id: command-compact
-      name: '@deepseek-ai/dsh-command-compact'
-    - id: tool-result-pruner
-      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-      config:
-        thresholdChars: 8192
-        headChars: 4096
-        tailChars: 1024
-```
-
-Source hot reload, in the `hmr` row's `root` list:
-
-```yaml
-      - 'C:/resource/dsh-compaction-threshold/index.js'
-      - 'C:/resource/dsh-compaction-threshold/engine.js'
-      - 'C:/resource/dsh-compaction-threshold/client.js'
-      - 'C:/resource/dsh-compaction-threshold/lib/policy.js'
-```
-
-## Use
-
-The engine row accepts the same `Config` as `compaction-basic` (`thresholdRatio`,
-`headroomTokens`, `retainRatio`/`retainTokens`, `maxTokens`,
-`compactionRetries`, `maxOverflowRetries`, `modelPolicies`, `auto`); only
-`thresholdRatio` is overridable per session.
-
-The composer chip shows the session's ratio and opens a menu of 30 %–100 % plus
-`Preset default`. The same change can be typed:
-
-| Input | Effect |
-|---|---|
-| `/compaction-threshold` | Report the current ratio, its origin, and the resolved trigger |
-| `/compaction-threshold 60` or `60%` | Compact this session once pressure reaches 60 % of its window |
-| `/compaction-threshold 0.6` | The same, written as a ratio |
-| `/compaction-threshold default` | Drop the override and follow the preset again |
-
-The override applies from the next step and survives restart. It is also
-enforced while a turn is running, because it is read at every step boundary.
-
-### Inheritance by a forked session and a delegated child
-
-A forked session and a subagent child both record their direct parent in
-`SessionHeader.parentSession` (`packages/core/session/src/types.ts`), so both
-inherit. A child receives a **snapshot** of the nearest ancestor that owns a
-value, up to 16 generations, and owns it from then on:
-
-| Situation | Result |
-|---|---|
-| Child's parent has 70 %, preset default 10 % | Child shows 70 % and `inherited from the parent session` |
-| That parent had no value, its own parent had 25 % | Child inherits 25 % (nearest ancestor with a value) |
-| Parent changes 70 % → 50 % after the child exists | Child keeps 70 %: the snapshot was taken once |
-| Child's `/compaction-threshold default` | Child returns to the preset default and does **not** re-inherit |
-| No ancestor owns a value | Child follows the preset default |
-
-The record that carries a snapshot is also the marker that the inheritance was
-spent, which is what keeps `default` meaningful in a child. The inherited value
-is written durably, so it survives restarts, and the chip keeps its origin
-visible in the tooltip and menu (the row disappears once the child's value
-differs from the inherited one).
-
-## Model Experience
+## Model experience
 
 ### Per-session compaction threshold
 
@@ -157,181 +167,135 @@ differs from the inherited one).
 
 Nothing directly: the plugin adds no tool and no prompt text. Indirectly it
 changes when a `<compacted-summary>` checkpoint replaces older history and how
-much recent history stays verbatim, exactly as `compaction-basic` does.
+much recent history stays verbatim, exactly as the shipped backend does.
 
 #### Token effect
 
 Lowering a session's ratio compacts earlier and therefore spends fewer prompt
 tokens per request at the cost of more summaries; raising it (up to the capacity
-cap) compacts later. The summarization request itself is the same one upstream
-issues.
+cap) compacts later. The summarization request itself is the same one the shipped
+backend issues.
 
-#### KV Cache effect
+#### KV-cache effect
 
-The summarization call reuses the conversation's own prefix, as upstream does.
-Changing the ratio never rewrites a request prefix, so it invalidates no
-provider cache; it only changes which requests still carry the un-compacted
-prefix.
+The summarization call reuses the conversation's own prefix, as the shipped
+backend does. Changing the ratio never rewrites a request prefix, so it
+invalidates no provider cache; it only changes which requests still carry the
+un-compacted prefix.
 
-## Verify
+## Verification
 
 ```sh
 node probe/probe.mjs
 ```
 
-The probe drives the pure policy module (threshold arithmetic, capacity caps,
-range selection, command grammar) without a host.
+The probe drives the pure policy module without a host: threshold arithmetic,
+capacity caps, range selection, the command grammar, and the inheritance walk
+(direct parent, ancestor skipping, unusable values, cycle safety, depth cap).
+20 probes pass.
 
-### Module identity under a source-launched host
+Two further probes need no browser: `probe/session-tools.mjs` decodes the
+zstd-framed session logs and reports each stored session's preset, tool catalog,
+and delegation depth, and `probe/tsx-identity.mjs` proves that a plugin outside
+the checkout shares the host's `BasicCompactionEngine` and `Service` objects under
+a source-launched host.
 
-```sh
-cd C:/resource/deepseek-harness
-node --import tsx/esm C:/resource/dsh-compaction-threshold/probe/tsx-identity.mjs
-```
-
-A host launched as `node --import tsx/esm apps/cli/src/bin.ts web` maps
-`@deepseek-ai/dsh-*` to the repository sources through its tsconfig paths. The
-probe proves a plugin outside the checkout resolves the **same** module objects
-(`BasicCompactionEngine`, `Service`) as that host, so subclassing the engine and
-registering a service keep the host's class identities. Install the plugin as a
-`link:` dependency for this to hold in an installed (non-source) host too; a
-plugin-local `node_modules` pointing at built `lib/` output would load a second
-copy of both classes instead.
-
-### Diagnosing a stored Session's tools
-
-```sh
-node probe/session-tools.mjs                 # preset, tool count, shell tools per session
-node probe/session-tools.mjs "" 40 --headers # every request/header it recorded
-```
-
-Read-only: it decodes the zstd-framed logs under `~/.dsh/sessions` and reports
-the selected preset, each `request/header`'s tool names, and the delegation
-depth, which is how a session whose agent preset contributed no tools is told
-apart from one that never mounted the plugin.
-
-### Browser verification against the dev host
+The browser probes drive the installed Edge through `playwright-core` and verify
+against a dev host that the chip renders, the menu writes through the command,
+the value is per session, `default` clears it, clearing does not re-inherit, a
+fork inherits, and a delegated child inherits:
 
 ```sh
 node probe/dev-ui.mjs http://127.0.0.1:3081/?token=…
-node probe/dev-inspect.mjs http://127.0.0.1:3081/?token=…   # DOM/text diagnostics
+node probe/dev-fork.mjs http://127.0.0.1:3081/?token=… 70
+node probe/dev-subagent.mjs http://127.0.0.1:3081/?token=… 80
+node probe/dev-chip.mjs http://127.0.0.1:3081/?token=… 4
 ```
-
-`dev-ui.mjs` drives the installed Edge through the `playwright-core` the primary
-profile already carries (no browser download): it dismisses the beta notice,
-opens a blank session, changes the ratio from the chip menu, runs turns, and
-prints the chip's label and tooltip at each step. Screenshots land in
-`.dev-artifacts/`.
-
-What a green run looks like (verified on 2026-09-26 against a dev host):
-
-| Observation | Meaning |
-|---|---|
-| `before: text="压缩 10%"` | the preset's configured ratio reaches the chip |
-| menu lists `跟随预设（10%） 30%…100%` | the projection drives the menu |
-| `after choosing 60%: text="压缩 60%"` | command → durable store → projection → chip |
-| `after a turn at 60%: title="约在 32K tokens 的 60% 触发"` | the engine resolved the session's ratio and published the real trigger |
-| `new session: text="压缩 10%"` | the override is per session |
-| `command/done … back to the configured 10%` | the `default` row clears the override |
-| `compaction/start` → `compaction/summary` → `compaction/end` in the session log | the pressure branch reached the summarization transaction |
-| `compaction/prune` | the same branch prunes first when a pruner is mounted |
-
-Inheritance, verified the same way (`probe/dev-fork.mjs`,
-`probe/dev-subagent.mjs`):
-
-| Observation | Meaning |
-|---|---|
-| parent `压缩 70%`, child after fork `压缩 70%` with `· 继承自父会话` | a forked session inherits the parent's value |
-| parent `压缩 70%`, no note | the parent's own value is not labelled inherited |
-| child cleared to the preset default, next turn still the preset default | clearing does not re-inherit |
-| domain record `74f96152… ratio=0.8 from=session-fde8bb9d…` after a `subagent` call | a delegated child inherits too, with its lineage recorded |
-
-### A threshold cannot fix pressure that lives in the tool schemas
-
-Compaction is only attempted when the pressure budget is crossed, and upstream's
-transaction refuses a summary that is not smaller than the span it replaces.
-When a deployment declares a window barely larger than its own tool catalog, the
-pressure sits in the schemas — which no span selection can shadow — so the
-engine prunes, tries a summary, and honestly reports
-`summary is not smaller than the shadowed content`. A per-session ratio changes
-*when* the engine tries; it cannot create headroom that the surface does not
-hold. Verified against the shipped backend: 23 of 23 real compactions succeeded
-in the primary profile's own sessions, and the refusals appeared only in a
-synthetic dev route with a 8k–32k declared window.
 
 ## Developing against a dev host
 
 A dev host is required to verify anything the client half renders, and it must
-never share the primary host's port. The primary host owns **3080 on all
-interfaces**; a second host that inherits the default port tries to bind the same
-address, and on Windows that second bind can take the listener away from the
-running host — the running host then dies. Boot a dev host only with an explicit
-port, and check the port first:
+never share the primary host's port. A second host that inherits the default port
+tries to bind the same address, and on Windows that second bind can take the
+listener away from the running host — the running host then dies. Check the port
+first, then boot with an explicit one:
 
 ```powershell
 Get-NetTCPConnection -State Listen -LocalPort 3081 -ErrorAction SilentlyContinue   # expect nothing
-```
-
-```powershell
 ./scripts/dev-host.ps1                      # DSH_HOME + profile + 127.0.0.1:3081 + --no-open
-./scripts/dev-host.ps1 -Port 3082           # another free port
+./scripts/dev-host.ps1 -Checkout C:/path/to/deepseek-harness   # boot from source through tsx
 ```
 
-`scripts/dev-host.ps1` refuses port 3080, refuses a port that is already
+`scripts/dev-host.ps1` refuses the primary port, refuses a port that is already
 listening, refuses `~/.dsh` as `DSH_HOME`, and binds loopback only. The three
 isolations it guarantees:
 
 | Resource | Primary host | Dev host |
 |---|---|---|
-| Port | 3080, `0.0.0.0` (via `dsh-lan-access`) | explicit free port, `127.0.0.1` |
-| `DSH_HOME` | `~/.dsh` | `C:\resource\dsh-compaction-threshold-dev-home` |
+| Port | the deployment's own port | explicit free port, `127.0.0.1` |
+| `DSH_HOME` | `~/.dsh` | a separate directory |
 | Browser | opened by the harness | `--no-open`, so no window steals focus |
 
 Other rules that matter here:
 
-- `--port 0` lets the OS assign a free port, which cannot collide at all; read
-  the bound port from the host's startup output.
+- `--port 0` lets the OS assign a free port, which cannot collide at all.
 - `--from-default-profile web` **boots** the profile it initializes; it is not an
   init-only switch. Pass the port flags in that same command.
-- A profile's own `cordis.patch.yml` is live-reloaded, but a **new dependency**
-  (`link:`) is read at startup, so the dev host needs one restart after
-  `dsh plugin --profile ct-dev add …`.
-- Keep two trees: `C:\resource\dsh-compaction-threshold` (the tree the primary
-  profile links, only ever left at a working commit) and a
-  `git worktree` dev copy that only the dev profile links and only `hmr` watches.
-- Credentials live per home: copy `.credentials.yaml` into the dev home, or
-  export the provider key in the environment before booting.
+- A profile's `cordis.patch.yml` is live-reloaded, but a **new dependency** is read
+  at startup, so the dev host needs one restart after installing the plugin.
+- Credentials live per home: copy `.credentials.yaml` into the dev home, or export
+  the provider key in the environment before booting.
+- File-level `hmr` roots reload the host half without a restart; after adding a
+  root, touch the file once, because the watcher reacts to a change.
 
-## Known Limitations and Deferred Work
+## Known limitations
 
-- **Transcribed upstream policy.** The pressure branch, its formula, and the
-  range selection are transcribed from `@deepseek-ai/dsh-compaction-basic`
+- **Copied trigger policy.** The pressure branch, its formula, and the range
+  selection are transcribed from `@deepseek-ai/dsh-compaction-basic`
   0.1.7-rc.1 (`src/config.ts`, `src/index.ts`, `src/region.ts`). Those internals
-  are not exported, so an upstream change to them must be mirrored here by hand;
-  the probe pins the arithmetic, not the upstream file hashes.
+  are not exported, so an upstream change must be mirrored here by hand, and the
+  `Config` schema is inherited from the installed package rather than owned. The
+  probe pins the arithmetic, not upstream file contents.
 - **The ratio cannot exceed the capacity cap.** With a large output reservation
   or headroom, high percentages are inert; the chip reports the resolved trigger
   so that is visible instead of silent.
-- **Overrides are keyed by Session id and never garbage-collected** when a
-  Session is deleted. `/compaction-threshold default` clears one session's value,
-  and the whole domain can be dropped by deleting its storage unit file.
+- **A threshold cannot fix pressure that lives in the tool schemas.** Compaction
+  is only attempted when the budget is crossed, and the transaction refuses a
+  summary that is not smaller than the span it replaces. In a deployment whose
+  declared window is barely larger than its own tool catalog, the engine prunes,
+  tries a summary, and honestly reports
+  `summary is not smaller than the shadowed content`. A ratio changes *when* the
+  engine tries; it cannot create headroom the surface does not hold.
 - **A snapshot is taken at the child's first observation, not at the fork.**
-  There is no fork hook to subscribe to: the Session store emits no creation or
-  fork event, so lineage is read from `SessionHeader.parentSession` and the copy
-  happens the first time the child is read (by the engine's pressure check or by
-  the projection). An ancestor that changes its value between the fork and that
-  first observation is what the child inherits. A child that owns no record yet
-  also inherits a value its ancestor sets later; owning any record spends the
-  inheritance for good.
-- **A child inherits only where the engine is mounted.** The child keeps its
-  parent's agent preset, so this holds for both a fork and a delegated child in a
-  preset that carries the engine row; a child of a preset that still runs
-  `compaction-basic` has no chip and no inheritance.
+  The Session store emits no creation or fork event, so lineage is read from
+  `SessionHeader.parentSession` and the copy happens the first time the child is
+  read (the engine's pressure check or the projection). An ancestor that changes
+  its value between the fork and that first observation is what the child
+  inherits, and a child that owns no record yet still inherits a value its
+  ancestor sets later; owning any record spends the inheritance for good.
+- **A child inherits only where the engine is mounted.** A child keeps its
+  parent's agent preset, so this holds for a preset that carries the engine row; a
+  child of a preset still running the shipped backend has no chip and no
+  inheritance.
+- **The package declares no dependencies on purpose.** `@deepseek-ai/cordis`,
+  `@deepseek-ai/dsh-compaction`, and `@deepseek-ai/dsh-compaction-basic` must
+  resolve from the host, exactly like the shipped rows do; a `link:` or git
+  install inside a DSH profile resolves them through that profile, so the plugin
+  shares the host's module instances instead of loading a second copy of the
+  engine and of `Service`. Running `import('dsh-compaction-threshold')` outside a
+  host therefore fails on those specifiers, which is expected.
+- **Records are never garbage-collected** when a session is deleted.
+  `/compaction-threshold default` clears one session's value, and the whole
+  domain can be dropped by deleting its storage unit file.
 - **No storage domain means no persistence.** Without `ctx.storageDomain` the
-  override lives in process memory only (the plugin logs one warning); the
-  engine keeps working.
+  value lives in process memory only (the plugin logs one warning) and the engine
+  keeps working.
 - **A preset without the engine row shows no chip**, because no projection is
-  published: the chip never offers a switch no backend would honor.
+  published: the chip never offers a switch no backend would honour.
 - **The chip renders beside the context meter, not inside it.** The built-in
   meter's popover has no extension slot, so the effective trigger is repeated in
   this chip's own tooltip and menu heading.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
