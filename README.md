@@ -246,7 +246,15 @@ Other rules that matter here:
 - Credentials live per home: copy `.credentials.yaml` into the dev home, or export
   the provider key in the environment before booting.
 - File-level `hmr` roots reload the host half without a restart; after adding a
-  root, touch the file once, because the watcher reacts to a change.
+  root, touch the file once, because the watcher reacts to a change. A root list
+  added to a live patch while the host runs is not a reliable signal either —
+  restart once after wiring, and the roots are active from then on.
+- **The watch reloads host-plane rows only.** `dsh-compaction-threshold` (the
+  store, the projection, the command) reloads on a file change; the engine row is
+  mounted inside an agent preset's realm, and the reload does not re-import it, so
+  an engine change needs the preset remounted — a host restart, or a preset edit
+  that rebinds its sessions. Reach for a restart when a change touches
+  `engine.js` or `lib/policy.js`.
 
 ## Known limitations
 

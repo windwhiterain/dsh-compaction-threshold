@@ -27,12 +27,12 @@ const NS = 'compactionThreshold'
 /** Chinese copy. */
 const zh = {
   'chip': '压缩 {percent}',
-  'chip.unknown': '压缩 自动',
+  'chip.unknown': '压缩 默认',
   'menu.trigger': '约在 {window} tokens 的 {percent} 触发',
   'menu.unmeasured': '本次会话还没有可测量的请求',
   'option.percent': '{percent}',
-  'option.default': '跟随预设（{percent}）',
-  'option.defaultUnknown': '跟随预设',
+  'option.default': '默认（{percent}）',
+  'option.defaultUnknown': '默认',
   'mode': '自动压缩阈值：{name}',
   'note.inherited': '继承自父会话',
   'number.thousand': '{value}K',
@@ -44,12 +44,12 @@ const zh = {
 /** English copy. */
 const en = {
   'chip': 'Compact {percent}',
-  'chip.unknown': 'Compact auto',
+  'chip.unknown': 'Compact default',
   'menu.trigger': 'Triggers near {percent} of {window} tokens',
   'menu.unmeasured': 'No measured request in this session yet',
   'option.percent': '{percent}',
-  'option.default': 'Preset default ({percent})',
-  'option.defaultUnknown': 'Preset default',
+  'option.default': 'Default ({percent})',
+  'option.defaultUnknown': 'Default',
   'mode': 'Auto-compaction threshold: {name}',
   'note.inherited': 'inherited from the parent session',
   'number.thousand': '{value}K',

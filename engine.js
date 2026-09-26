@@ -50,6 +50,16 @@ export default class CompactionThresholdEngine extends BasicCompactionEngine {
     super(ctx, config)
     this.thresholds = ctx.get('compactionThreshold')
     this.warnedTargets = new Set()
+    this.registerConfigured()
+  }
+
+  /**
+   * Publish this row's configured ratio to the host store, which reports it as
+   * the value a session without its own follows. Re-published on every
+   * resolution because a host-plane reload recreates that store while this row,
+   * mounted in an agent preset, keeps running.
+   */
+  registerConfigured() {
     this.thresholds?.registerConfigured(
       this.config.thresholdRatio,
       this.config.retainRatio ?? null,
@@ -115,6 +125,7 @@ export default class CompactionThresholdEngine extends BasicCompactionEngine {
       contextWindow: spec.contextWindow,
       retainTokens: spec.retainTokens,
     })
+    this.registerConfigured()
 
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
