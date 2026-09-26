@@ -16,11 +16,20 @@
  * an out-of-tree plugin therefore lives beside the Session log, exactly like
  * any other non-session application data.
  *
+ * A forked session and a subagent child both record their direct parent in
+ * `SessionHeader.parentSession` (`packages/core/session/src/types.ts`), so a
+ * child inherits the nearest ancestor's ratio as a snapshot: the first time the
+ * child is observed, the value is resolved up the lineage and persisted as the
+ * child's own, after which the two sessions evolve independently. The record
+ * that carries a snapshot is also the marker that the inheritance is spent, so
+ * clearing the value in a child returns it to the preset default instead of
+ * re-inheriting.
+ *
  * @module dsh-compaction-threshold
  */
 
 import { Service } from '@deepseek-ai/cordis'
-import { formatPercent, isUsableRatio, parseThresholdInput } from './lib/policy.js'
+import { formatPercent, isUsableRatio, parseThresholdInput, resolveInheritedOverride } from './lib/policy.js'
 
 /** Storage domain name; a storage unit name must match `/^[a-z][a-z0-9_]*$/`. */
 const DOMAIN_NAME = 'compaction_threshold'
@@ -45,6 +54,7 @@ const EMPTY_FACTS = {
   ratio: null,
   configuredRatio: null,
   source: 'unknown',
+  inherited: false,
   thresholdTokens: null,
   contextWindow: null,
   retainTokens: null,
@@ -55,17 +65,43 @@ function sameFacts(left, right) {
   return left.ratio === right.ratio
     && left.configuredRatio === right.configuredRatio
     && left.source === right.source
+    && left.inherited === right.inherited
     && left.thresholdTokens === right.thresholdTokens
     && left.contextWindow === right.contextWindow
     && left.retainTokens === right.retainTokens
+}
+
+/**
+ * Accept one stored record, keeping only the fields this plugin owns and
+ * dropping anything unusable, so a hand-edited or older unit cannot inject a
+ * value the engine would refuse.
+ *
+ * @param record - value read from the storage domain.
+ * @returns the normalized record, or null when it carries nothing usable.
+ */
+function normalizeRecord(record) {
+  if (record === null || typeof record !== 'object') return null
+  const ratio = isUsableRatio(record.ratio) ? record.ratio : null
+  const inheritedFrom = typeof record.inheritedFrom === 'string' ? record.inheritedFrom : undefined
+  const inheritedRatio = isUsableRatio(record.inheritedRatio) ? record.inheritedRatio : undefined
+  if (ratio === null && inheritedFrom === undefined) return null
+  return {
+    ratio,
+    ...inheritedFrom === undefined ? {} : { inheritedFrom },
+    ...inheritedRatio === undefined ? {} : { inheritedRatio },
+  }
 }
 
 /** One session's automatic compaction threshold, writable while it runs. */
 export default class CompactionThresholdService extends Service {
   constructor(ctx) {
     super(ctx, 'compactionThreshold')
-    /** Session id -> ratio override, the synchronous read path of the engine. */
-    this.overrides = new Map()
+    /**
+     * Session id -> durable record, the synchronous read path of the engine.
+     * A `null` ratio means the session follows the preset; the record itself
+     * still marks an inherited snapshot as spent.
+     */
+    this.records = new Map()
     /** Session id -> facts of the last pressure resolution performed for it. */
     this.resolved = new Map()
     /** Identity-stable client views, keyed by Session id. */
@@ -89,10 +125,11 @@ export default class CompactionThresholdService extends Service {
           }
           this.domain = domain
           for (const [sessionId, record] of domain.table(DOMAIN_TABLE).entries()) {
-            if (isUsableRatio(record?.ratio)) this.overrides.set(sessionId, record.ratio)
+            const normalized = normalizeRecord(record)
+            if (normalized !== null) this.records.set(sessionId, normalized)
           }
           child.logger.info(
-            `compaction-threshold: ${this.overrides.size} session override(s) restored`,
+            `compaction-threshold: ${this.records.size} session record(s) restored`,
           )
           return () => domain.close()
         }).catch((error) => {
@@ -114,7 +151,12 @@ export default class CompactionThresholdService extends Service {
         key: PROJECTION_KEY,
         stateVersion: 1,
         stateSchema: PASSTHROUGH_SCHEMA,
-        init: header => this.recompute({ sessionId: header.id, ...EMPTY_FACTS }),
+        init: (header) => {
+          // The chip must show an inherited value before the session's first
+          // request resolves one, so inheritance is applied at first observation.
+          this.applyInheritance(header.id, header.parentSession ?? null)
+          return this.recompute({ sessionId: header.id, ...EMPTY_FACTS })
+        },
         apply: state => this.recompute(state),
         wire: {
           viewSchema: PASSTHROUGH_SCHEMA,
@@ -134,13 +176,76 @@ export default class CompactionThresholdService extends Service {
   }
 
   /**
-   * The session's own override, or null when the preset's configured ratio applies.
-   * @param session - session whose override is read.
-   * @returns the override ratio, or null.
+   * The session's own ratio, an inherited snapshot it owns, or null when the
+   * preset's configured ratio applies.
+   * @param session - session whose value is read.
+   * @returns the effective ratio with its origin, or null for the configured ratio.
    */
   ratioFor(session) {
-    const ratio = this.overrides.get(session.id)
-    return ratio === undefined ? null : { ratio }
+    this.applyInheritance(session.id, session.header?.parentSession ?? null)
+    const record = this.records.get(session.id)
+    if (record === undefined || record.ratio === null) return null
+    return {
+      ratio: record.ratio,
+      source: record.inheritedFrom !== undefined && record.ratio === record.inheritedRatio
+        ? 'inherited'
+        : 'session',
+    }
+  }
+
+  /**
+   * Give a forked or delegated session its parent's value once, as a snapshot.
+   *
+   * The write is memory-first: the value applies to the current step even if the
+   * durable put is still in flight or fails, matching the store's general
+   * degrade-to-process-local rule. A session that already owns a record has
+   * spent its inheritance, which is what keeps `default` from re-inheriting.
+   *
+   * @param sessionId - the inheriting session.
+   * @param parentId - its direct parent, absent for a top-level session.
+   */
+  applyInheritance(sessionId, parentId) {
+    if (parentId === null || parentId === undefined) return
+    if (this.records.has(sessionId)) return
+    const found = resolveInheritedOverride({
+      startId: parentId,
+      parentOf: id => this.parentOf(id),
+      overrideOf: id => this.records.get(id)?.ratio ?? null,
+    })
+    if (found === null) return
+    const record = { ratio: found.ratio, inheritedFrom: found.fromId, inheritedRatio: found.ratio }
+    this.records.set(sessionId, record)
+    void this.persist(sessionId, record, true).catch((error) => {
+      this.ctx.logger.warn(
+        `compaction-threshold: inherited value for ${sessionId} stays in memory `
+        + `(${error instanceof Error ? error.message : String(error)})`,
+      )
+    })
+  }
+
+  /**
+   * The direct parent recorded by one session's header.
+   * @param sessionId - session to read.
+   * @returns the parent id, or null when the session has none or is not live.
+   */
+  parentOf(sessionId) {
+    const sessions = this.ctx.get('sessions')
+    const session = sessions?.get(sessionId)
+    return session?.header?.parentSession ?? null
+  }
+
+  /**
+   * Write one session's record, durably when the domain is open.
+   * @param sessionId - session the record belongs to.
+   * @param record - the value to store.
+   * @param onlyIfAbsent - skip the write when a record appeared meanwhile.
+   * @returns after the durable write settles.
+   */
+  async persist(sessionId, record, onlyIfAbsent = false) {
+    const domain = this.domain
+    if (domain === null) return
+    if (onlyIfAbsent && this.records.get(sessionId) !== record) return
+    await domain.table(DOMAIN_TABLE).put(sessionId, { ...record, updatedAt: Date.now() })
   }
 
   /**
@@ -163,22 +268,27 @@ export default class CompactionThresholdService extends Service {
   }
 
   /**
-   * Durable write path for one session's override; an absent storage domain
+   * Durable write path for one session's value; an absent storage domain
    * degrades to a process-local value rather than failing the switch.
-   * @param sessionId - session the override belongs to.
+   *
+   * Clearing keeps the record with a null ratio: the record is also the marker
+   * that an inherited snapshot was already spent, so the session returns to the
+   * preset default instead of inheriting again. An inherited snapshot's origin
+   * is kept, so the composer reports the lineage only while the inherited value
+   * is still the session's value.
+   *
+   * @param sessionId - session the value belongs to.
    * @param ratio - the new ratio, or null to restore the configured one.
    */
   async setRatio(sessionId, ratio) {
-    const domain = this.domain
-    if (ratio === null) {
-      if (domain !== null) await domain.table(DOMAIN_TABLE).delete(sessionId)
-      this.overrides.delete(sessionId)
-      return
+    const previous = this.records.get(sessionId)
+    const record = {
+      ratio: ratio === null ? null : ratio,
+      ...previous?.inheritedFrom === undefined ? {} : { inheritedFrom: previous.inheritedFrom },
+      ...previous?.inheritedRatio === undefined ? {} : { inheritedRatio: previous.inheritedRatio },
     }
-    if (domain !== null) {
-      await domain.table(DOMAIN_TABLE).put(sessionId, { ratio, updatedAt: Date.now() })
-    }
-    this.overrides.set(sessionId, ratio)
+    this.records.set(sessionId, record)
+    await this.persist(sessionId, record)
   }
 
   /** Run one `/compaction-threshold` invocation. */
@@ -215,10 +325,13 @@ export default class CompactionThresholdService extends Service {
 
   /** The human-readable current value for one session. */
   report(sessionId) {
-    const override = this.overrides.get(sessionId)
+    const record = this.records.get(sessionId)
     const resolved = this.resolved.get(sessionId)
-    const effective = override ?? resolved?.ratio ?? this.configured.ratio
-    const origin = override === undefined ? 'configured' : 'this session'
+    const effective = record?.ratio ?? resolved?.ratio ?? this.configured.ratio
+    const inherited = record?.ratio !== null && record?.ratio !== undefined
+      && record.inheritedFrom !== undefined && record.ratio === record.inheritedRatio
+    const origin = inherited ? 'inherited from the parent session'
+      : record?.ratio == null ? 'configured' : 'this session'
     const trigger = resolved !== undefined && resolved.ratio === effective
       ? `, triggering near ${formatPercent(resolved.thresholdTokens / resolved.contextWindow)} `
         + `of ${resolved.contextWindow} tokens`
@@ -232,23 +345,27 @@ export default class CompactionThresholdService extends Service {
   }
 
   /**
-   * Fold the current override and resolution into one fact record, returning
-   * the previous object when nothing observable changed (the registry's change
-   * gate compares references).
+   * Fold the current value and resolution into one fact record, returning the
+   * previous object when nothing observable changed (the registry's change gate
+   * compares references).
    */
   recompute(previous) {
     const sessionId = previous.sessionId
-    const override = this.overrides.get(sessionId)
+    const record = this.records.get(sessionId)
+    const override = record?.ratio ?? null
     const resolved = this.resolved.get(sessionId)
     const ratio = override ?? resolved?.ratio ?? this.configured.ratio
     const fresh = resolved !== undefined && resolved.ratio === ratio ? resolved : undefined
+    const inherited = override !== null && record.inheritedFrom !== undefined
+      && override === record.inheritedRatio
     const next = {
       sessionId,
       ratio: ratio ?? null,
       configuredRatio: this.configured.ratio ?? null,
       source: ratio === null || ratio === undefined
         ? 'unknown'
-        : override === undefined ? 'configured' : 'session',
+        : inherited ? 'inherited' : override === null ? 'configured' : 'session',
+      inherited: inherited || (fresh?.source === 'inherited'),
       thresholdTokens: fresh?.thresholdTokens ?? null,
       contextWindow: fresh?.contextWindow ?? null,
       retainTokens: fresh?.retainTokens ?? null,
@@ -264,6 +381,7 @@ export default class CompactionThresholdService extends Service {
       ratio: state.ratio,
       configuredRatio: state.configuredRatio,
       source: state.source,
+      inherited: state.inherited,
       thresholdTokens: state.thresholdTokens,
       contextWindow: state.contextWindow,
       retainTokens: state.retainTokens,

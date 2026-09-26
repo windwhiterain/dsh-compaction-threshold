@@ -13,6 +13,7 @@ import {
   formatPercent,
   isUsableRatio,
   parseThresholdInput,
+  resolveInheritedOverride,
   resolvePolicy,
   resolveSpec,
   selectCompactableRange,
@@ -161,6 +162,53 @@ test('percentages render without trailing zeros', () => {
   assert.equal(isUsableRatio(0), false)
   assert.equal(isUsableRatio(1.2), false)
   assert.equal(isUsableRatio('0.4'), false)
+})
+
+/** Lineage stubs: `parents` maps a session id to its own parent. */
+const lineage = (parents, ratios) => ({
+  parentOf: id => parents[id] ?? null,
+  overrideOf: id => ratios[id] ?? null,
+})
+
+test('a child inherits its direct parent value', () => {
+  const lookups = lineage({ child: 'parent' }, { parent: 0.6 })
+  assert.deepEqual(resolveInheritedOverride({ startId: 'parent', ...lookups }), { ratio: 0.6, fromId: 'parent' })
+})
+
+test('inheritance skips ancestors without a value', () => {
+  const lookups = lineage({ child: 'parent', parent: 'grandparent', grandparent: 'root' }, { grandparent: 0.25 })
+  assert.deepEqual(
+    resolveInheritedOverride({ startId: 'parent', ...lookups }),
+    { ratio: 0.25, fromId: 'grandparent' },
+  )
+})
+
+test('an unusable ancestor value is not inherited', () => {
+  const lookups = lineage({ parent: 'grandparent' }, { parent: 0, grandparent: 1.5 })
+  assert.equal(resolveInheritedOverride({ startId: 'parent', ...lookups }), null)
+})
+
+test('a lineage with no value resolves to nothing', () => {
+  const lookups = lineage({ parent: 'grandparent' }, {})
+  assert.equal(resolveInheritedOverride({ startId: 'parent', ...lookups }), null)
+  assert.equal(resolveInheritedOverride({ startId: null, ...lookups }), null)
+})
+
+test('a damaged cyclic lineage resolves to nothing instead of looping', () => {
+  const lookups = lineage({ first: 'second', second: 'first' }, {})
+  assert.equal(resolveInheritedOverride({ startId: 'first', ...lookups }), null)
+})
+
+test('the walk stops at the depth cap', () => {
+  const parents = {}
+  const chain = Array.from({ length: 25 }, (_value, index) => `s${index}`)
+  chain.forEach((id, index) => { if (index > 0) parents[id] = chain[index - 1] })
+  const lookups = lineage(parents, { s0: 0.3 })
+  assert.equal(resolveInheritedOverride({ startId: 's24', ...lookups }), null)
+  assert.deepEqual(
+    resolveInheritedOverride({ startId: 's24', ...lookups, maxDepth: 30 }),
+    { ratio: 0.3, fromId: 's0' },
+  )
 })
 
 console.log(`\n${checks} probes passed`)

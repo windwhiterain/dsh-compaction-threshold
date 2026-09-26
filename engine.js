@@ -110,7 +110,7 @@ export default class CompactionThresholdEngine extends BasicCompactionEngine {
 
     this.thresholds?.recordResolved(session.id, {
       ratio: spec.thresholdRatio,
-      source: override === null ? 'configured' : 'session',
+      source: override?.source ?? 'configured',
       thresholdTokens: spec.thresholdTokens,
       contextWindow: spec.contextWindow,
       retainTokens: spec.retainTokens,

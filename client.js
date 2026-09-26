@@ -34,6 +34,7 @@ const zh = {
   'option.default': '跟随预设（{percent}）',
   'option.defaultUnknown': '跟随预设',
   'mode': '自动压缩阈值：{name}',
+  'note.inherited': '继承自父会话',
   'number.thousand': '{value}K',
   'number.million': '{value}M',
   'error.command': '阈值修改失败：{message}',
@@ -50,6 +51,7 @@ const en = {
   'option.default': 'Preset default ({percent})',
   'option.defaultUnknown': 'Preset default',
   'mode': 'Auto-compaction threshold: {name}',
+  'note.inherited': 'inherited from the parent session',
   'number.thousand': '{value}K',
   'number.million': '{value}M',
   'error.command': 'The threshold was not changed: {message}',
@@ -168,8 +170,13 @@ window.__ModuleLoader__.load({
           percent: formatPercent(facts.thresholdTokens / facts.contextWindow),
           window: formatTokens(facts.contextWindow, t),
         })
+      // A value inherited from the parent session is still this session's own
+      // value; the note only keeps its origin visible.
+      const inheritedNote = facts.inherited === true ? t('note.inherited') : null
+      const title = inheritedNote === null ? trigger : `${trigger} · ${inheritedNote}`
 
       const items = [{ type: 'label', id: 'heading', text: trigger }]
+      if (inheritedNote !== null) items.push({ type: 'label', id: 'inherited', text: inheritedNote })
       if (error !== null) {
         items.push({ id: ERROR_OPTION, label: error, disabled: true, danger: true })
       }
@@ -187,7 +194,7 @@ window.__ModuleLoader__.load({
           id,
           label: h(Row, {
             label: t('option.percent', { percent: id }),
-            detail: id === currentId && facts.source === 'session' ? trigger : undefined,
+            detail: id === currentId && facts.source !== 'configured' ? trigger : undefined,
           }),
         })
       }
@@ -223,7 +230,7 @@ window.__ModuleLoader__.load({
             ...hover && !busy ? { background: 'var(--dsw-alias-interactive-bg-hover)' } : {},
             ...busy ? { color: 'var(--dsw-alias-label-dimmed)', cursor: 'default' } : {},
           },
-          title: trigger,
+          title,
           'aria-label': t('mode', { name: label }),
           'aria-haspopup': 'menu',
           'aria-expanded': open,

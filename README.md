@@ -128,6 +128,27 @@ The composer chip shows the session's ratio and opens a menu of 30 %–100 % plu
 The override applies from the next step and survives restart. It is also
 enforced while a turn is running, because it is read at every step boundary.
 
+### Inheritance by a forked session and a delegated child
+
+A forked session and a subagent child both record their direct parent in
+`SessionHeader.parentSession` (`packages/core/session/src/types.ts`), so both
+inherit. A child receives a **snapshot** of the nearest ancestor that owns a
+value, up to 16 generations, and owns it from then on:
+
+| Situation | Result |
+|---|---|
+| Child's parent has 70 %, preset default 10 % | Child shows 70 % and `inherited from the parent session` |
+| That parent had no value, its own parent had 25 % | Child inherits 25 % (nearest ancestor with a value) |
+| Parent changes 70 % → 50 % after the child exists | Child keeps 70 %: the snapshot was taken once |
+| Child's `/compaction-threshold default` | Child returns to the preset default and does **not** re-inherit |
+| No ancestor owns a value | Child follows the preset default |
+
+The record that carries a snapshot is also the marker that the inheritance was
+spent, which is what keeps `default` meaningful in a child. The inherited value
+is written durably, so it survives restarts, and the chip keeps its origin
+visible in the tooltip and menu (the row disappears once the child's value
+differs from the inherited one).
+
 ## Model Experience
 
 ### Per-session compaction threshold
@@ -215,6 +236,16 @@ What a green run looks like (verified on 2026-09-26 against a dev host):
 | `compaction/start` → `compaction/summary` → `compaction/end` in the session log | the pressure branch reached the summarization transaction |
 | `compaction/prune` | the same branch prunes first when a pruner is mounted |
 
+Inheritance, verified the same way (`probe/dev-fork.mjs`,
+`probe/dev-subagent.mjs`):
+
+| Observation | Meaning |
+|---|---|
+| parent `压缩 70%`, child after fork `压缩 70%` with `· 继承自父会话` | a forked session inherits the parent's value |
+| parent `压缩 70%`, no note | the parent's own value is not labelled inherited |
+| child cleared to the preset default, next turn still the preset default | clearing does not re-inherit |
+| domain record `74f96152… ratio=0.8 from=session-fde8bb9d…` after a `subagent` call | a delegated child inherits too, with its lineage recorded |
+
 ### A threshold cannot fix pressure that lives in the tool schemas
 
 Compaction is only attempted when the pressure budget is crossed, and upstream's
@@ -282,8 +313,20 @@ Other rules that matter here:
   or headroom, high percentages are inert; the chip reports the resolved trigger
   so that is visible instead of silent.
 - **Overrides are keyed by Session id and never garbage-collected** when a
-  Session is deleted. `/compaction-threshold default` clears one session, and
-  the whole domain can be dropped by deleting its storage unit file.
+  Session is deleted. `/compaction-threshold default` clears one session's value,
+  and the whole domain can be dropped by deleting its storage unit file.
+- **A snapshot is taken at the child's first observation, not at the fork.**
+  There is no fork hook to subscribe to: the Session store emits no creation or
+  fork event, so lineage is read from `SessionHeader.parentSession` and the copy
+  happens the first time the child is read (by the engine's pressure check or by
+  the projection). An ancestor that changes its value between the fork and that
+  first observation is what the child inherits. A child that owns no record yet
+  also inherits a value its ancestor sets later; owning any record spends the
+  inheritance for good.
+- **A child inherits only where the engine is mounted.** The child keeps its
+  parent's agent preset, so this holds for both a fork and a delegated child in a
+  preset that carries the engine row; a child of a preset that still runs
+  `compaction-basic` has no chip and no inheritance.
 - **No storage domain means no persistence.** Without `ctx.storageDomain` the
   override lives in process memory only (the plugin logs one warning); the
   engine keeps working.
