@@ -9,7 +9,7 @@ granularity for real work — a long refactor wants to compact late and keep its
 history verbatim, a scratch session wants to compact early and stay cheap, and
 neither should require a host restart.
 
-This plugin keeps the same trigger arithmetic and makes the percentage **per
+This plugin keeps the same compaction transaction and makes the percentage **per
 session**: a chip beside the permission and model chips shows the value, a menu
 changes it in one click, `/compaction-threshold` does the same from the keyboard,
 and the value is stored durably beside the session log so it survives a restart.
@@ -45,8 +45,8 @@ from:
 ![The threshold menu](docs/menu.png)
 
 Once a request has been measured, the chip's tooltip and the menu heading report
-the percentage the trigger actually resolved to, so an inert setting (one above
-the capacity cap) is visible rather than silent.
+the token count the trigger resolved to, so the percentage in force is visible
+rather than implied.
 
 ## Quick start
 
@@ -137,16 +137,31 @@ inherited unchanged.
 
 ### The threshold formula
 
-Unchanged from the shipped backend:
-
 ```
-thresholdTokens = floor(min(contextWindow × ratio, contextWindow − outputReservation − headroomTokens))
+thresholdTokens = floor(contextWindow × ratio)
 ```
 
-Only `ratio` can come from the session. A ratio at or above
-`(contextWindow − outputReservation − headroomTokens) / contextWindow` therefore
-changes nothing: the capacity cap binds first, and the chip reports the resolved
-trigger so that is visible rather than silent.
+A percentage here is the share of the declared context window the session may
+fill before it compacts, and nothing else scales it down.
+
+That is the plugin's one deliberate divergence from
+`@deepseek-ai/dsh-compaction-basic`, which also caps the threshold at
+`contextWindow − outputReservation − headroomTokens`. That cap makes a large
+output reservation shrink every percentage at once: on a 262 144-token window
+with `maxTokens: 131072` and the default 65 536 headroom, the cap is 65 536
+tokens, so **every setting from 25 % to 100 % behaves identically** and the knob
+stops meaning what it says. Removing the cap restores the full range: 100 % now
+means "compact only when the window is essentially full".
+
+The consequence is worth stating plainly: the prompt plus its reserved completion
+still has to fit the provider's real window, so a high percentage can reach a
+provider overflow. The upstream recovery path handles that case and bypasses the
+ratio by design — it is the provider telling the session it is out of room, not
+the threshold policy firing.
+
+`headroomTokens` is still accepted because the inherited schema carries it, and
+it still supplies the default summary budget, but it no longer shifts the
+trigger. `retainRatio`/`retainTokens` are window-relative for the same reason.
 
 ### Why the override lives in a storage domain, not the session log
 
@@ -172,9 +187,9 @@ much recent history stays verbatim, exactly as the shipped backend does.
 #### Token effect
 
 Lowering a session's ratio compacts earlier and therefore spends fewer prompt
-tokens per request at the cost of more summaries; raising it (up to the capacity
-cap) compacts later. The summarization request itself is the same one the shipped
-backend issues.
+tokens per request at the cost of more summaries; raising it compacts later, up to
+the point where the provider itself reports the request as too long. The
+summarization request itself is the same one the shipped backend issues.
 
 #### KV-cache effect
 
@@ -189,8 +204,8 @@ un-compacted prefix.
 node probe/probe.mjs
 ```
 
-The probe drives the pure policy module without a host: threshold arithmetic,
-capacity caps, range selection, the command grammar, and the inheritance walk
+The probe drives the pure policy module without a host: the window fraction and
+its retention, the command grammar, range selection, and the inheritance walk
 (direct parent, ancestor skipping, unusable values, cycle safety, depth cap).
 20 probes pass.
 
@@ -258,15 +273,20 @@ Other rules that matter here:
 
 ## Known limitations
 
-- **Copied trigger policy.** The pressure branch, its formula, and the range
-  selection are transcribed from `@deepseek-ai/dsh-compaction-basic`
-  0.1.7-rc.1 (`src/config.ts`, `src/index.ts`, `src/region.ts`). Those internals
-  are not exported, so an upstream change must be mirrored here by hand, and the
-  `Config` schema is inherited from the installed package rather than owned. The
-  probe pins the arithmetic, not upstream file contents.
-- **The ratio cannot exceed the capacity cap.** With a large output reservation
-  or headroom, high percentages are inert; the chip reports the resolved trigger
-  so that is visible instead of silent.
+- **One divergence from the shipped backend, by design.** The threshold is a
+  plain window fraction; the shipped backend would cap it at
+  `window − outputReservation − headroomTokens`, which can compress the whole
+  25 %–100 % range of the knob onto one value. Span selection, the summarization
+  transaction, retention, pruning, and retries are still transcribed from
+  `@deepseek-ai/dsh-compaction-basic` 0.1.7-rc.1 (`src/region.ts`
+  `selectCompactableRange` and the engine's transaction). Those internals are not
+  exported, so an upstream change must be mirrored here by hand, and the `Config`
+  schema is inherited from the installed package rather than owned. The probe
+  pins the arithmetic, not upstream file contents.
+- **A high percentage can still hit a provider overflow.** The request must fit
+  the provider's window with its reserved completion, and the upstream recovery
+  path compacts on a provider-confirmed overflow without consulting the ratio. A
+  percentage controls the threshold; the provider controls its own limit.
 - **A threshold cannot fix pressure that lives in the tool schemas.** Compaction
   is only attempted when the budget is crossed, and the transaction refuses a
   summary that is not smaller than the span it replaces. In a deployment whose

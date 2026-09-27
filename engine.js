@@ -2,10 +2,12 @@
  * Compaction backend with a per-session threshold.
  *
  * This is `@deepseek-ai/dsh-compaction-basic` with one difference: the pressure
- * ratio for the routed model may be overridden per session. Everything else —
- * the summarizer call, pruning, the compaction transaction, retention, retries,
- * and context-overflow recovery — is the upstream implementation, inherited
- * unchanged.
+ * ratio for the routed model may be overridden per session, and that ratio is a
+ * plain fraction of the declared context window rather than one further capped by
+ * the route's output reservation and headroom (see `lib/policy.js`). Everything
+ * else — the summarizer call, pruning, the compaction transaction, retention,
+ * retries, and context-overflow recovery — is the upstream implementation,
+ * inherited unchanged.
  *
  * The override is read from the host-plane `compactionThreshold` service when
  * one is mounted, and falls back to this row's configured `thresholdRatio`
@@ -31,11 +33,6 @@ function routedTarget(session) {
     return undefined
   }
   return { provider: config.provider, model: config.model }
-}
-
-/** Output tokens the routed request reserves, which share the window with the prompt. */
-function reservedCompletionTokens(session, defaultMaxTokens) {
-  return session.requestHeader()?.config.maxTokens ?? defaultMaxTokens ?? 0
 }
 
 /** Whether surface node 0 is the session's system prompt, which a span never shadows. */
@@ -102,11 +99,7 @@ export default class CompactionThresholdEngine extends BasicCompactionEngine {
 
     let spec
     try {
-      spec = resolveSpec(
-        policy,
-        info.context.contextWindow,
-        reservedCompletionTokens(session, info.defaultMaxTokens),
-      )
+      spec = resolveSpec(policy, info.context.contextWindow)
     } catch (error) {
       // A misconfiguration is reported once per route, then skipped: the base
       // listener logs this throw, and repeating it every step would bury the

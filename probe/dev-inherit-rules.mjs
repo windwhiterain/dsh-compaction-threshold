@@ -42,7 +42,7 @@ try {
 
   await chip().click()
   await page.waitForTimeout(700)
-  await page.locator('[role="menuitem"]', { hasText: /跟随预设|Preset default/ }).first().click()
+  await page.locator('[role="menuitem"]', { hasText: /^默认|^Default/ }).first().click()
   await page.waitForTimeout(2_500)
   await state('after clearing to the preset default')
 

@@ -103,7 +103,7 @@ try {
   //    which the same conversation now exceeds, so the engine must summarize
   await chip().click()
   await page.waitForTimeout(700)
-  await page.locator('[role="menuitem"]', { hasText: /跟随预设|Preset default/ }).first().click()
+  await page.locator('[role="menuitem"]', { hasText: /^默认|^Default/ }).first().click()
   await page.waitForTimeout(2_000)
   await chipState('after clearing back to the preset default')
   await sendTurn('再用一句话说明这个文件里最深的一个不变量。')

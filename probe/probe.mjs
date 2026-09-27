@@ -38,42 +38,42 @@ const policy = (overrides = {}) => ({
 })
 
 test('threshold is the window fraction when it binds below the capacity cap', () => {
-  const spec = resolveSpec(policy({ thresholdRatio: 0.4 }), 1_000_000, 0)
+  const spec = resolveSpec(policy({ thresholdRatio: 0.4 }), 1_000_000)
   assert.equal(spec.thresholdTokens, 400_000)
   assert.equal(spec.retainTokens, 160_000)
 })
 
-test('headroom caps a ratio that would otherwise exceed the pressure budget', () => {
-  const spec = resolveSpec(policy({ thresholdRatio: 0.99 }), 1_000_000, 0)
-  assert.equal(spec.thresholdTokens, 1_000_000 - DEFAULT_HEADROOM_TOKENS)
+test('the percentage is a plain fraction of the window, with no capacity cap', () => {
+  const spec = resolveSpec(policy({ thresholdRatio: 0.99 }), 1_000_000)
+  assert.equal(spec.thresholdTokens, 990_000)
+  const full = resolveSpec(policy({ thresholdRatio: 1 }), 262_144)
+  assert.equal(full.thresholdTokens, 262_144)
 })
 
-test('a reserved completion budget lowers the cap and the retention base', () => {
-  const spec = resolveSpec(policy(), 128_000, 32_000)
-  assert.equal(spec.thresholdTokens, 128_000 - 32_000 - DEFAULT_HEADROOM_TOKENS)
-  assert.equal(spec.retainTokens, Math.floor(96_000 * 0.16))
+test('a reserved completion budget no longer shrinks the threshold', () => {
+  // The route reserves half the window for output; the ratio still means the
+  // share of the window, which is what the composer showed the user.
+  const spec = resolveSpec(policy(), 262_144)
+  assert.equal(spec.thresholdTokens, Math.floor(262_144 * 0.8))
+  assert.equal(spec.retainTokens, Math.floor(262_144 * 0.16))
 })
 
 test('an absolute retention budget is used verbatim', () => {
-  const spec = resolveSpec(policy({ retainRatio: undefined, retainTokens: 5_000 }), 1_000_000, 0)
+  const spec = resolveSpec(policy({ retainRatio: undefined, retainTokens: 5_000 }), 1_000_000)
   assert.equal(spec.retainTokens, 5_000)
 })
 
 test('retention reaching the threshold is a configuration failure', () => {
   assert.throws(
-    () => resolveSpec(policy({ thresholdRatio: 0.1 }), 1_000_000, 0),
+    () => resolveSpec(policy({ thresholdRatio: 0.1 }), 1_000_000),
     error => error instanceof ThresholdConfigError && /retainTokens \(160000\) must be less than/.test(error.message),
   )
 })
 
 test('a window that cannot carry a request is a configuration failure', () => {
   assert.throws(
-    () => resolveSpec(policy(), 10_000, 10_000),
-    error => error instanceof ThresholdConfigError && /leaving no message budget/.test(error.message),
-  )
-  assert.throws(
-    () => resolveSpec(policy(), 10_000, 0),
-    error => error instanceof ThresholdConfigError && /leaving no pressure budget/.test(error.message),
+    () => resolveSpec(policy(), 0),
+    error => error instanceof ThresholdConfigError && /must be a positive integer/.test(error.message),
   )
 })
 
