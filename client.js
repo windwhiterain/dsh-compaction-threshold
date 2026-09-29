@@ -12,6 +12,11 @@
  * so the bundle route and the module-table identity agree.
  */
 
+// A combo batch concatenates every plugin bundle into one classic script, so
+// top-level declarations share one global lexical scope across plugins. The
+// IIFE keeps this bundle's names (for example `DEFAULT_OPTION`) out of it and
+// leaves only the `load` call below at the top level.
+;(function () {
 /** Menu percentages offered as one-tap values. */
 const STEP_PERCENTS = [30, 40, 50, 60, 70, 80, 90, 100]
 
@@ -156,9 +161,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       const [hover, setHover] = useState(false)
 
-      // A preset without the engine row publishes no projection: the chip is absent
-      // rather than offering a switch that no backend would honor.
-      if (facts === undefined) return null
+      // A preset without the engine row publishes no value for this session: the
+      // chip is absent rather than offering a switch that no backend honors.
+      if (facts == null) return null
 
       const ratio = facts.ratio
       const configured = facts.configuredRatio
@@ -271,3 +276,4 @@ window.__ModuleLoader__.load({
     }
   },
 })
+})()
