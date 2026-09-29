@@ -18,6 +18,12 @@ import {
   resolveSpec,
   selectCompactableRange,
 } from '../lib/policy.js'
+import { THRESHOLD_ENGINE } from '../lib/brand.js'
+
+// A second instance of the brand module stands in for the one source hot reload
+// installs after an edit. A module-local `Symbol` would hand it a different key
+// and make every live engine look like a stranger to the host half.
+const reloadedBrand = await import('../lib/brand.js?generation=2')
 
 let checks = 0
 const test = (name, run) => {
@@ -209,6 +215,11 @@ test('the walk stops at the depth cap', () => {
     resolveInheritedOverride({ startId: 's24', ...lookups, maxDepth: 30 }),
     { ratio: 0.3, fromId: 's0' },
   )
+})
+
+test('the engine brand is one registry key across module generations', () => {
+  assert.equal(reloadedBrand.THRESHOLD_ENGINE, THRESHOLD_ENGINE)
+  assert.equal(THRESHOLD_ENGINE, Symbol.for('dsh-compaction-threshold/engine'))
 })
 
 console.log(`\n${checks} probes passed`)

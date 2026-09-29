@@ -30,6 +30,7 @@
 
 import { Service } from '@deepseek-ai/cordis'
 import { formatPercent, isUsableRatio, parseThresholdInput, resolveInheritedOverride } from './lib/policy.js'
+import { THRESHOLD_ENGINE } from './lib/brand.js'
 
 /** Storage domain name; a storage unit name must match `/^[a-z][a-z0-9_]*$/`. */
 const DOMAIN_NAME = 'compaction_threshold'
@@ -294,6 +295,15 @@ export default class CompactionThresholdService extends Service {
   /** Run one `/compaction-threshold` invocation. */
   async applyCommand(agent, rawInput) {
     const sessionId = agent.session.id
+    // A value accepted here would be stored and displayed while the session's
+    // own backend ignores it, so a session without this engine is told instead.
+    if (!this.hasEngine(sessionId)) {
+      return {
+        kind: 'error',
+        text: 'compaction-threshold: this session\'s agent preset does not mount '
+          + 'dsh-compaction-threshold/engine, so it has no per-session threshold',
+      }
+    }
     const parsed = parseThresholdInput(rawInput)
     switch (parsed.kind) {
       case 'report':
@@ -373,8 +383,23 @@ export default class CompactionThresholdService extends Service {
     return sameFacts(previous, next) ? previous : next
   }
 
-  /** Identity-stable wire value for one fact record. */
+  /**
+   * Identity-stable wire value for one fact record, or `null` when the session's
+   * composition has no engine to honor a ratio, which the client reads as this
+   * control not being offered.
+   *
+   * Absence is a `null` value rather than an omitted key because the registry
+   * assigns this key unconditionally and a `SessionSummary` carries these values
+   * through the `api-session/added` Remote event, whose lossless-JSON check
+   * rejects an `undefined` member. The key stays present with a JSON-safe value
+   * that means "not offered for this session".
+   *
+   * The gate is applied here rather than in the fold because the engine's
+   * presence is not a session fact: a recompose changes it without appending
+   * anything, while this function is evaluated on every read.
+   */
   viewOf(state) {
+    if (!this.hasEngine(state.sessionId)) return null
     const cached = this.views.get(state.sessionId)
     if (cached !== undefined && cached.facts === state) return cached.value
     const value = {
@@ -388,5 +413,35 @@ export default class CompactionThresholdService extends Service {
     }
     this.views.set(state.sessionId, { facts: state, value })
     return value
+  }
+
+  /**
+   * Whether one session's own composition mounts this plugin's engine as its
+   * `compaction` service.
+   *
+   * A preset revision publishes its services behind an `isolate` realm, so the
+   * engine is unreadable through `agent.ctx.get('compaction')`; the registry's
+   * `serviceFor` resolves the revision that agent joined instead
+   * (`@deepseek-ai/dsh-agent-preset-registry` `src/mount.ts`). Asking the registry
+   * by agent rather than by preset id keeps the answer tied to the composition
+   * the session actually received, which is what a recompose changes.
+   *
+   * A deployment composing no preset roster falls back to the agent's own realm,
+   * which is where a host-plane backend publishes.
+   *
+   * A session with no registered agent reports true: creation mounts the preset
+   * before publishing the agent, so an unregistered agent is one whose
+   * composition is not yet known, and withholding the control from a session
+   * that is still being created is the worse error.
+   *
+   * @param sessionId - session whose agent composition is inspected.
+   * @returns whether a ratio written for that session would be honored.
+   */
+  hasEngine(sessionId) {
+    const agent = this.ctx.get('agents')?.get(sessionId)
+    if (agent === undefined) return true
+    const engine = this.ctx.get('agentPresets')?.serviceFor(agent, 'compaction')
+      ?? agent.ctx.get('compaction')
+    return engine?.[THRESHOLD_ENGINE] === true
   }
 }

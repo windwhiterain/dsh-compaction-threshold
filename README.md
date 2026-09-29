@@ -205,15 +205,18 @@ node probe/probe.mjs
 ```
 
 The probe drives the pure policy module without a host: the window fraction and
-its retention, the command grammar, range selection, and the inheritance walk
-(direct parent, ancestor skipping, unusable values, cycle safety, depth cap).
-20 probes pass.
+its retention, the command grammar, range selection, the inheritance walk (direct
+parent, ancestor skipping, unusable values, cycle safety, depth cap), and the
+engine brand's survival across module generations. 21 probes pass.
 
-Two further probes need no browser: `probe/session-tools.mjs` decodes the
-zstd-framed session logs and reports each stored session's preset, tool catalog,
-and delegation depth, and `probe/tsx-identity.mjs` proves that a plugin outside
-the checkout shares the host's `BasicCompactionEngine` and `Service` objects under
-a source-launched host.
+Further probes need no browser. `probe/session-tools.mjs` decodes the zstd-framed
+session logs and reports each stored session's preset, tool catalog, and
+delegation depth. `probe/session-detail.mjs` reports one session's selected
+presets, routes, token counts, and compaction events, and
+`probe/surface-tokens.mjs` prices its surface with the harness's own estimator —
+the pair behind a "compaction did not trigger" report. `probe/tsx-identity.mjs`
+proves that a plugin outside the checkout shares the host's
+`BasicCompactionEngine` and `Service` objects under a source-launched host.
 
 The browser probes drive the installed Edge through `playwright-core` and verify
 against a dev host that the chip renders, the menu writes through the command,
@@ -318,8 +321,18 @@ Other rules that matter here:
 - **No storage domain means no persistence.** Without `ctx.storageDomain` the
   value lives in process memory only (the plugin logs one warning) and the engine
   keeps working.
-- **A preset without the engine row shows no chip**, because no projection is
-  published: the chip never offers a switch no backend would honour.
+- **A preset without the engine row shows no chip, and refuses the command.** The
+  projection view returns `null` for a session whose own `compaction` service is
+  not this engine, which the chip reads as "not offered"; `/compaction-threshold`
+  reports the same instead of storing a value nothing would honour. The gate is
+  evaluated on every read rather than in the fold, so switching preset takes
+  effect at once, and it reads that engine through `agentPresets.serviceFor`:
+  a preset revision publishes its services behind an `isolate` realm, so
+  `agent.ctx.get('compaction')` resolves outside it and finds the host plane
+  instead. Absence is `null` and never an omitted or `undefined` value:
+  the registry assigns the key unconditionally and a `SessionSummary` forwards
+  these values through `api-session/added`, whose lossless-JSON check rejects an
+  `undefined` member.
 - **The chip renders beside the context meter, not inside it.** The built-in
   meter's popover has no extension slot, so the effective trigger is repeated in
   this chip's own tooltip and menu heading.

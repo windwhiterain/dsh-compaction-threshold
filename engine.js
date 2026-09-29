@@ -25,6 +25,7 @@ import {
   selectCompactableRange,
   ThresholdConfigError,
 } from './lib/policy.js'
+import { THRESHOLD_ENGINE } from './lib/brand.js'
 
 /** Resolve the exact provider/model durably routed for the latest request. */
 function routedTarget(session) {
@@ -45,6 +46,9 @@ export default class CompactionThresholdEngine extends BasicCompactionEngine {
 
   constructor(ctx, config = {}) {
     super(ctx, config)
+    // Every instance is branded, so the host-plane service can tell this
+    // engine apart from a preset's own backend without importing this module.
+    this[THRESHOLD_ENGINE] = true
     this.thresholds = ctx.get('compactionThreshold')
     this.warnedTargets = new Set()
     this.registerConfigured()
